@@ -137,6 +137,54 @@ To clear the cache:
 rm -rf chroma_db/
 ```
 
+## Model Memory Management
+
+The module automatically manages embedding models to prevent CUDA out-of-memory errors:
+
+### Automatic Model Caching
+When creating multiple `PDFRAGModule` instances, the embedding model is automatically cached and reused:
+
+```python
+# First module creates and caches the embedding model
+pdf1 = PDFRAGModule("doc1.pdf")
+
+# Second module reuses the cached model - no additional GPU memory used!
+pdf2 = PDFRAGModule("doc2.pdf")
+
+# Third module also reuses the same model
+pdf3 = PDFRAGModule("doc3.pdf")
+```
+
+### Cache Management
+For advanced users who need to manage GPU memory:
+
+```python
+from pdf_rag_module import clear_embed_cache, get_embed_cache_info
+
+# Check what models are cached
+info = get_embed_cache_info()
+print(f"Cached models: {info['num_models']}")
+
+# Clear the cache to free GPU memory
+clear_embed_cache()
+```
+
+### Custom Embedding Models
+You can still provide your own embedding model if needed:
+
+```python
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+# Create a custom model
+custom_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-large-en-v1.5",
+    device="cuda"
+)
+
+# Use it in the module
+pdf_module = PDFRAGModule("doc.pdf", embed_model=custom_model)
+```
+
 ## Configuration
 
 ### Embedding Model

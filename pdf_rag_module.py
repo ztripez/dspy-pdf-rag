@@ -1,16 +1,95 @@
 """
 PDF RAG Module for DSPy
 A reusable DSPy module for PDF retrieval and question answering.
+
+Features:
+- Automatic embedding model caching to prevent CUDA OOM
+- Flexible signatures for different extraction tasks
+- Persistent ChromaDB storage for instant retrieval
+- GPU acceleration with adaptive batch sizing
+
+Model Caching:
+The module automatically caches embedding models to prevent memory issues when
+creating multiple PDFRAGModule instances. The same model configuration will
+reuse the cached instance, saving GPU memory.
+
+Cache Management:
+- clear_embed_cache(): Clear all cached models to free memory
+- get_embed_cache_info(): Get information about cached models
 """
 
 import os
 import dspy
-from typing import Optional, Union, Type
+import threading
+from typing import Optional, Union, Type, Dict, Tuple
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
+
+# Module-level embedding model cache to prevent CUDA OOM
+_embed_model_cache: Dict[Tuple[str, str, int], HuggingFaceEmbedding] = {}
+_cache_lock = threading.Lock()
+
+
+def _get_or_create_embed_model(
+    model_name: Optional[str] = None,
+    device: Optional[str] = None,
+    embed_batch_size: int = 4,
+    trust_remote_code: bool = True
+) -> HuggingFaceEmbedding:
+    """
+    Get or create an embedding model from the cache.
+    This prevents creating multiple instances of the same model, avoiding CUDA OOM.
+    """
+    # Default values
+    if model_name is None:
+        model_name = "Alibaba-NLP/gte-large-en-v1.5"
+    if device is None:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Create cache key
+    cache_key = (model_name, device, embed_batch_size)
+    
+    # Check cache with thread safety
+    with _cache_lock:
+        if cache_key not in _embed_model_cache:
+            # Create new model
+            _embed_model_cache[cache_key] = HuggingFaceEmbedding(
+                model_name=model_name,
+                embed_batch_size=embed_batch_size,
+                trust_remote_code=trust_remote_code,
+                device=device
+            )
+        
+        return _embed_model_cache[cache_key]
+
+
+def clear_embed_cache():
+    """
+    Clear the embedding model cache to free GPU memory.
+    Use this when you need to switch models or free memory.
+    """
+    global _embed_model_cache
+    with _cache_lock:
+        _embed_model_cache.clear()
+
+
+def get_embed_cache_info() -> Dict[str, int]:
+    """
+    Get information about the embedding model cache.
+    Returns the number of cached models and their configurations.
+    """
+    with _cache_lock:
+        return {
+            "num_models": len(_embed_model_cache),
+            "models": [
+                {"model": key[0], "device": key[1], "batch_size": key[2]}
+                for key in _embed_model_cache.keys()
+            ]
+        }
 
 
 class PDFQASignature(dspy.Signature):
@@ -61,12 +140,8 @@ class PDFRAGModule(dspy.Module):
         
         # Initialize embedding model if not provided
         if embed_model is None:
-            self.embed_model = HuggingFaceEmbedding(
-                model_name="Alibaba-NLP/gte-large-en-v1.5",
-                embed_batch_size=4,
-                trust_remote_code=True,
-                device="cuda" if __import__('torch').cuda.is_available() else "cpu"
-            )
+            # Use cached model to prevent CUDA OOM
+            self.embed_model = _get_or_create_embed_model()
         else:
             self.embed_model = embed_model
         
@@ -191,3 +266,7 @@ class PDFRAGModule(dspy.Module):
     def __call__(self, query: str, **kwargs) -> dspy.Prediction:
         """Allow calling the module directly."""
         return self.forward(query, **kwargs)
+
+
+# Export public API
+__all__ = ['PDFRAGModule', 'clear_embed_cache', 'get_embed_cache_info']
